@@ -1134,6 +1134,62 @@ def cmd_sync(_args):
     git_sync("manual sync")
 
 
+REPO_RAW_URL = "https://raw.githubusercontent.com/moritzpflueger/zeit/main/zeit"
+
+def cmd_update(_args):
+    script_path = Path(__file__).resolve()
+
+    # Check if installed via git
+    is_git = (script_path.parent / ".git").exists()
+    if is_git:
+        print("Installed via git. Update with:")
+        print(f"  cd {script_path.parent} && git pull")
+        return
+
+    # Fetch remote version
+    import urllib.request
+    try:
+        print("Checking for updates...", end=" ", flush=True)
+        req = urllib.request.urlopen(REPO_RAW_URL, timeout=5)
+        remote_script = req.read().decode()
+    except Exception:
+        print("failed")
+        print("Could not reach GitHub.")
+        return
+
+    # Extract remote VERSION
+    remote_version = None
+    for line in remote_script.splitlines():
+        if line.startswith("VERSION"):
+            remote_version = line.split('"')[1]
+            break
+
+    if not remote_version:
+        print("failed")
+        return
+
+    print(f"done")
+    print(f"  Installed: {VERSION}")
+    print(f"  Available: {remote_version}")
+    print()
+
+    if remote_version == VERSION:
+        print("Already up to date.")
+        return
+
+    try:
+        confirm = input("Update? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if confirm != "y":
+        print("Cancelled.")
+        return
+
+    script_path.write_text(remote_script)
+    print(f"Updated to {remote_version}.")
+
+
 HELP = f"""{LOGO}
 simple time logger
 
@@ -1153,6 +1209,7 @@ simple time logger
   zeit sync                           Manual GitHub sync
   zeit init                           First-time setup
   zeit config                         Change settings
+  zeit update                         Check for updates
   zeit -h                             Show this help
   zeit --version                      Show version
 
@@ -1178,7 +1235,7 @@ def main():
     cmd = args[0]
 
     # Commands that work without config
-    unchecked = {"init": cmd_init}
+    unchecked = {"init": cmd_init, "update": cmd_update}
 
     if cmd in unchecked:
         unchecked[cmd](args[1:])
