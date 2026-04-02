@@ -33,6 +33,14 @@ zeit update              # curl installs — checks for new version
 cd <your-zeit-dir> && git pull  # git installs
 ```
 
+### Uninstall
+
+```bash
+rm ~/.local/bin/zeit     # remove the script or symlink
+rm -rf <your-zeit-dir>   # remove the cloned repo (git installs only)
+rm -rf ~/.zeit           # remove your data (optional)
+```
+
 `zeit init` walks you through first-time setup:
 - Creates a `~/.zeit/` data directory for your logs
 - Optionally sets your billing currency and connects a private GitHub repo for sync
