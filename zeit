@@ -632,6 +632,12 @@ def cmd_config(_args):
 
     options.append(("symlink", "Reinstall symlink"))
 
+    # Show remap option if cwd is already mapped
+    cwd = os.getcwd()
+    current_label = detect_project(config)
+    if current_label:
+        options.append(("remap", f"Remap current directory ({current_label})"))
+
     for i, (_, label) in enumerate(options, 1):
         print(f"  {i}. {label}")
     print()
@@ -660,6 +666,14 @@ def cmd_config(_args):
         _setup_git_sync()
     elif action == "symlink":
         _setup_symlink()
+    elif action == "remap":
+        # Find the config key for this directory
+        for prefix in config.get("projects", {}):
+            if cwd == prefix or cwd.startswith(prefix + "/"):
+                del config["projects"][prefix]
+                break
+        _create_new_project(config, cwd)
+        git_sync("update config")
     print()
 
 
