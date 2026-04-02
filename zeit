@@ -14,7 +14,7 @@ VERSION = "1.0.0"
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path.home() / ".zeit"
-LOG_FILE = DATA_DIR / "log.csv"
+LOG_FILE = DATA_DIR / "zeit.csv"
 CONFIG_FILE = DATA_DIR / "config.json"
 
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
@@ -252,6 +252,57 @@ def save_entries(entries):
 
 # ── Git sync ────────────────────────────────────────────────────────────────
 
+def _update_data_readme():
+    """Regenerate README.md in the data repo with current stats."""
+    entries = load_entries()
+    if not entries:
+        return
+
+    config = load_config()
+    currency = get_currency(config)
+    today = date.today()
+    current_month = today.strftime("%Y-%m")
+    month_label = today.strftime("%B %Y")
+
+    # Current month entries by project
+    month_entries = [e for e in entries if e["date"].startswith(current_month)]
+    by_project = {}
+    for e in month_entries:
+        by_project.setdefault(e["project"], 0)
+        by_project[e["project"]] += e["hours"]
+
+    total_all = sum(e["hours"] for e in entries)
+    total_month = sum(by_project.values())
+
+    lines = [
+        "# zeit-data",
+        "",
+        "Private data repo for [zeit](https://github.com/moritzpflueger/zeit) — a simple time logger.",
+        "",
+        f"## {month_label}",
+        "",
+    ]
+
+    if by_project:
+        max_hours = max(by_project.values()) if by_project else 1
+        bar_width = 10
+        for proj in sorted(by_project, key=by_project.get, reverse=True):
+            hours = by_project[proj]
+            filled = round(hours / max_hours * bar_width)
+            bar = "█" * filled + "░" * (bar_width - filled)
+            lines.append(f"    {proj:<20} {bar}  {hours:g}h")
+        lines.append("")
+
+    summary = f"**{month_label}: {total_month:g}h**"
+    if total_all != total_month:
+        summary += f" | All time: {total_all:g}h"
+    lines.append(summary)
+    lines.append("")
+
+    readme_path = DATA_DIR / "README.md"
+    readme_path.write_text("\n".join(lines))
+
+
 def git_sync(message="update log"):
     try:
         result = subprocess.run(
@@ -260,11 +311,15 @@ def git_sync(message="update log"):
         if result.returncode != 0 or not result.stdout.strip():
             return  # No git or no remote, skip silently
 
+        _update_data_readme()
         print("Syncing...", end=" ", flush=True)
         subprocess.run(["git", "add", "-A"], capture_output=True, cwd=DATA_DIR)
         subprocess.run(
             ["git", "commit", "-m", message],
             capture_output=True, cwd=DATA_DIR,
+        )
+        subprocess.run(
+            ["git", "pull", "--rebase"], capture_output=True, cwd=DATA_DIR
         )
         result = subprocess.run(
             ["git", "push"], capture_output=True, text=True, cwd=DATA_DIR
@@ -414,7 +469,9 @@ def cmd_init(_args):
     if is_configured():
         # Existing config (e.g. cloned data repo on new machine) — just need symlink
         target = Path.home() / ".local" / "bin" / "zeit"
-        if not target.exists() or not target.is_symlink():
+        source = SCRIPT_DIR / "zeit"
+        needs_symlink = not target.exists() or not target.is_symlink() or target.resolve() != source.resolve()
+        if needs_symlink:
             print()
             print("  Config found — looks like a restored setup.")
             print()
