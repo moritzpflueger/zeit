@@ -25,6 +25,23 @@ CONFIG_FILE = DATA_DIR / "config.json"
 
 DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
 
+RESET = "\033[0m"
+
+# 64-color palette: 32 hues × 2 lightness levels, all readable on dark/light backgrounds
+import colorsys as _colorsys
+_PALETTE = []
+for _l in (0.45, 0.60):
+    for _i in range(32):
+        _r, _g, _b = _colorsys.hls_to_rgb(_i / 32, _l, 0.6)
+        _PALETTE.append((int(_r * 255), int(_g * 255), int(_b * 255)))
+
+def project_color(label):
+    """Return ANSI true color escape derived from project label."""
+    import hashlib
+    idx = int(hashlib.md5(label.encode()).hexdigest(), 16) % len(_PALETTE)
+    r, g, b = _PALETTE[idx]
+    return f"\033[38;2;{r};{g};{b}m"
+
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 def is_configured():
@@ -112,7 +129,8 @@ def ask_project(config):
             for i, label in enumerate(sorted_labels, 1):
                 rate = existing[label]
                 rate_str = f"  ({rate} {currency}/h)" if rate and currency else ""
-                print(f"  {i}. {label}{rate_str}")
+                c = project_color(label)
+                print(f"  {i}. {c}{label}{RESET}{rate_str}")
             print(f"  0. New project")
             print()
             choice = input("Pick (or Enter to cancel): ").strip()
@@ -125,7 +143,7 @@ def ask_project(config):
                     label = match[0]
                     config["projects"][cwd] = {"label": label, "rate": existing[label]}
                     save_config(config)
-                    print(f"Mapped {cwd} → {label}")
+                    print(f"Mapped {cwd} → {project_color(label)}{label}{RESET}")
                     return label
                 print(f"  Unknown label: {choice}")
                 return None
@@ -136,7 +154,7 @@ def ask_project(config):
                 label = sorted_labels[idx - 1]
                 config["projects"][cwd] = {"label": label, "rate": existing[label]}
                 save_config(config)
-                print(f"Mapped {cwd} → {label}")
+                print(f"Mapped {cwd} → {project_color(label)}{label}{RESET}")
             else:
                 print("Invalid choice.")
                 return None
@@ -165,9 +183,9 @@ def _create_new_project(config, cwd):
     config["projects"][cwd] = {"label": label, "rate": rate}
     save_config(config)
     if rate and currency:
-        print(f"Mapped {cwd} → {label} ({rate} {currency}/h)")
+        print(f"Mapped {cwd} → {project_color(label)}{label}{RESET} ({rate} {currency}/h)")
     else:
-        print(f"Mapped {cwd} → {label}")
+        print(f"Mapped {cwd} → {project_color(label)}{label}{RESET}")
     return label
 
 # ── Date parsing ────────────────────────────────────────────────────────────
@@ -276,7 +294,7 @@ def _build_status(entries, config):
     return month_label, by_project, total_month, total_all
 
 
-def _render_status_bars(by_project, bar_width=10):
+def _render_status_bars(by_project, bar_width=10, color=True):
     """Render project bar chart lines. Returns list of strings."""
     if not by_project:
         return []
@@ -286,7 +304,11 @@ def _render_status_bars(by_project, bar_width=10):
         hours = by_project[proj]
         filled = round(hours / max_hours * bar_width)
         bar = "█" * filled + "░" * (bar_width - filled)
-        lines.append(f"  {proj:<20} {bar}  {hours:g}h")
+        if color:
+            c = project_color(proj)
+            lines.append(f"  {c}{proj:<20}{RESET} {c}{bar}{RESET}  {hours:g}h")
+        else:
+            lines.append(f"  {proj:<20} {bar}  {hours:g}h")
     return lines
 
 
@@ -300,12 +322,8 @@ def cmd_status(_args):
     currency = get_currency(config)
     month_label, by_project, total_month, total_all = _build_status(entries, config)
 
-    PINK = "\033[35m"
-    BLUE = "\033[34m"
-    RESET = "\033[0m"
-
     print()
-    print(f"  {PINK}{month_label}{RESET}")
+    print(f"  {month_label}")
     print()
     for line in _render_status_bars(by_project):
         print(f"  {line}")
@@ -319,7 +337,7 @@ def cmd_status(_args):
             total_earned += hours * get_project_rate(config, proj)
         if total_earned:
             summary += f" · {total_earned:,.0f} {currency}"
-    print(f"  {BLUE}{summary}{RESET}")
+    print(f"  {summary}")
     print()
 
 
@@ -341,7 +359,7 @@ def _update_data_readme():
         "",
     ]
 
-    for bar_line in _render_status_bars(by_project):
+    for bar_line in _render_status_bars(by_project, color=False):
         lines.append(f"  {bar_line}")
     if by_project:
         lines.append("")
@@ -590,9 +608,9 @@ def cmd_init(_args):
                 rate = float(rate_str) if rate_str else 0
             config["projects"][cwd] = {"label": label, "rate": rate}
             if rate and currency:
-                print(f"  Mapped → {label} ({rate} {currency}/h)")
+                print(f"  Mapped → {project_color(label)}{label}{RESET} ({rate} {currency}/h)")
             else:
-                print(f"  Mapped → {label}")
+                print(f"  Mapped → {project_color(label)}{label}{RESET}")
         else:
             print("  Skipped. zeit will ask when you first log hours.")
     except (EOFError, KeyboardInterrupt):
@@ -747,13 +765,13 @@ def cmd_log_hours(args):
             count += 1
             current += timedelta(days=1)
         desc_label = f" ({desc})" if desc else ""
-        print(f"Logged {hours}h for {project} on {count} days ({start.isoformat()} to {end.isoformat()}){desc_label}")
+        print(f"Logged {hours}h for {project_color(project)}{project}{RESET} on {count} days ({start.isoformat()} to {end.isoformat()}){desc_label}")
         git_sync(f"log {hours}h {project} {start.isoformat()}..{end.isoformat()}")
     else:
         log_entry(entry_date, hours, project, desc)
         day_label = "today" if entry_date == date.today() else entry_date.isoformat()
         desc_label = f" ({desc})" if desc else ""
-        print(f"Logged {hours}h for {project} on {day_label}{desc_label}")
+        print(f"Logged {hours}h for {project_color(project)}{project}{RESET} on {day_label}{desc_label}")
         git_sync(f"log {hours}h {project} {entry_date.isoformat()}")
 
 
@@ -930,7 +948,7 @@ def cmd_sum(args):
         if iso in by_date:
             info = by_date[iso]
             earned_str = f"  ({info['earned']:,.0f} {currency})" if info["earned"] > 0 and currency else ""
-            proj_str = ", ".join(info["projects"])
+            proj_str = ", ".join(f"{project_color(p)}{p}{RESET}" for p in info["projects"])
             desc_str = f"  {', '.join(info['descs'])}" if info["descs"] else ""
             print(f"  {iso}  {day_name}  {info['hours']:5.1f}h{earned_str}  {proj_str}{desc_str}")
         elif month_filter:  # Show gaps when viewing a time period
@@ -969,33 +987,31 @@ def cmd_sum(args):
         earnings[proj] = (hours, rate, earned)
         total_earned += earned
 
-    PINK = "\033[35m"
-    BLUE = "\033[34m"
-    RESET = "\033[0m"
-
     print()
     if auto_project:
         rate = get_project_rate(config, project_filter)
         rate_str = f" @ {rate} {currency}/h" if rate and currency else ""
-        print(f"  {BLUE}(filtered by {project_filter}{rate_str}){RESET}")
+        c = project_color(project_filter)
+        print(f"  (filtered by {c}{project_filter}{RESET}{rate_str})")
     elif all_projects:
-        print(f"  {BLUE}(all projects){RESET}")
+        print(f"  (all projects)")
     if total_earned > 0 and currency:
-        print(f"  {PINK}{header}: {total}h ({total_earned:,.0f} {currency}){RESET}")
+        print(f"  {header}: {total}h ({total_earned:,.0f} {currency})")
     else:
-        print(f"  {PINK}{header}: {total}h{RESET}")
+        print(f"  {header}: {total}h")
     if len(by_project) > 1:
         for proj in sorted(by_project):
             h, rate, earned = earnings[proj]
+            c = project_color(proj)
             if earned > 0 and currency:
-                print(f"    {PINK}{proj}: {h}h ({earned:,.0f} {currency}){RESET}")
+                print(f"    {c}{proj}: {h}h ({earned:,.0f} {currency}){RESET}")
             else:
-                print(f"    {PINK}{proj}: {h}h{RESET}")
+                print(f"    {c}{proj}: {h}h{RESET}")
 
     # Copy total hours to clipboard
     if copy_to_clipboard(str(total)):
         print()
-        print(f"  {BLUE}({total} copied to clipboard){RESET}")
+        print(f"  ({total} copied to clipboard)")
     print()
 
 
@@ -1013,10 +1029,6 @@ def cmd_last(args):
     config = load_config()
     currency = get_currency(config)
 
-    PINK = "\033[35m"
-    BLUE = "\033[34m"
-    RESET = "\033[0m"
-
     print()
     total = 0
     total_earned = 0
@@ -1027,15 +1039,16 @@ def cmd_last(args):
         earned = e["hours"] * rate
         earned_str = f"  ({earned:,.0f} {currency})" if earned > 0 and currency else ""
         desc_str = f"  {e['desc']}" if e.get("desc") else ""
-        print(f"  {d}  {weekday}  {e['hours']:5.1f}h{earned_str}  {e['project']}{desc_str}")
+        c = project_color(e["project"])
+        print(f"  {d}  {weekday}  {e['hours']:5.1f}h{earned_str}  {c}{e['project']}{RESET}{desc_str}")
         total += e["hours"]
         total_earned += earned
 
     print()
     if total_earned > 0 and currency:
-        print(f"  {PINK}Last {len(filtered)} entries: {total}h ({total_earned:,.0f} {currency}){RESET}")
+        print(f"  Last {len(filtered)} entries: {total}h ({total_earned:,.0f} {currency})")
     else:
-        print(f"  {PINK}Last {len(filtered)} entries: {total}h{RESET}")
+        print(f"  Last {len(filtered)} entries: {total}h")
     print()
 
 
@@ -1046,7 +1059,8 @@ def cmd_undo(_args):
         return
     last = entries[-1]
     desc_str = f"  {last['desc']}" if last.get("desc") else ""
-    print(f"Last entry: {last['date']}  {last['hours']}h  {last['project']}{desc_str}")
+    c = project_color(last['project'])
+    print(f"Last entry: {last['date']}  {last['hours']}h  {c}{last['project']}{RESET}{desc_str}")
     try:
         confirm = input("Remove? [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -1139,7 +1153,8 @@ def cmd_list(_args):
         info = by_label[label]
         rate_str = f"  ({info['rate']} {currency}/h)" if info["rate"] and currency else ""
         real_dirs = [d for d in info["dirs"] if not d.startswith("__imported__")]
-        print(f"  {label}{rate_str}")
+        c = project_color(label)
+        print(f"  {c}{label}{RESET}{rate_str}")
         for d in sorted(real_dirs):
             print(f"    {d}")
 
