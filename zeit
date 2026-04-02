@@ -94,6 +94,10 @@ def get_project_rate(config, label):
             return entry.get("rate", 0)
     return 0
 
+def get_entry_earned(e):
+    """Get earned amount for an entry."""
+    return e.get("earned", 0)
+
 def detect_project(config):
     cwd = os.getcwd()
     best_match = ""
@@ -246,10 +250,10 @@ def parse_date(arg):
 
 # ── CSV operations ──────────────────────────────────────────────────────────
 
-def log_entry(entry_date, hours, project, desc=""):
+def log_entry(entry_date, hours, project, desc="", earned=0):
     with open(LOG_FILE, "a", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow([entry_date.isoformat(), hours, project, desc])
+        writer.writerow([entry_date.isoformat(), hours, project, desc, earned])
 
 def load_entries():
     if not LOG_FILE.exists():
@@ -264,6 +268,7 @@ def load_entries():
                     "hours": float(row[1]),
                     "project": row[2],
                     "desc": row[3] if len(row) >= 4 else "",
+                    "earned": float(row[4]) if len(row) >= 5 and row[4] else 0,
                 })
     return entries
 
@@ -271,7 +276,7 @@ def save_entries(entries):
     with open(LOG_FILE, "w", newline="") as f:
         writer = csv.writer(f)
         for e in entries:
-            writer.writerow([e["date"], e["hours"], e["project"], e.get("desc", "")])
+            writer.writerow([e["date"], e["hours"], e["project"], e.get("desc", ""), e.get("earned", 0)])
 
 
 # ── Git sync ────────────────────────────────────────────────────────────────
@@ -332,9 +337,9 @@ def cmd_status(_args):
     if total_all != total_month:
         summary += f" · {total_all:g}h all time"
     if total_month and currency:
-        total_earned = 0
-        for proj, hours in by_project.items():
-            total_earned += hours * get_project_rate(config, proj)
+        current_month = date.today().strftime("%Y-%m")
+        month_entries = [e for e in entries if e["date"].startswith(current_month)]
+        total_earned = sum(get_entry_earned(e) for e in month_entries)
         if total_earned:
             summary += f" · {total_earned:,.0f} {currency}"
     print(f"  {summary}")
@@ -650,11 +655,15 @@ def cmd_config(_args):
 
     options.append(("symlink", "Reinstall symlink"))
 
-    # Show remap option if cwd is already mapped
+    # Show project options if cwd is already mapped
     cwd = os.getcwd()
     current_label = detect_project(config)
     if current_label:
-        options.append(("remap", f"Remap current directory ({current_label})"))
+        current_rate = get_project_rate(config, current_label)
+        c = project_color(current_label)
+        rate_label = f"{current_rate} {currency}/h" if current_rate and currency else "not set"
+        options.append(("rate", f"Hourly rate for {c}{current_label}{RESET} ({rate_label})"))
+        options.append(("remap", f"Remap current directory ({c}{current_label}{RESET})"))
 
     for i, (_, label) in enumerate(options, 1):
         print(f"  {i}. {label}")
@@ -684,6 +693,16 @@ def cmd_config(_args):
         _setup_git_sync()
     elif action == "symlink":
         _setup_symlink()
+    elif action == "rate":
+        rate_str = input(f"  Hourly rate for {current_label} ({currency}, Enter to skip): ").strip()
+        if rate_str:
+            rate = float(rate_str)
+            for prefix, entry in config.get("projects", {}).items():
+                if isinstance(entry, dict) and entry.get("label") == current_label:
+                    entry["rate"] = rate
+            save_config(config)
+            print(f"  Set to {rate} {currency}/h")
+        git_sync("update config")
     elif action == "remap":
         # Find the config key for this directory
         for prefix in config.get("projects", {}):
@@ -746,6 +765,9 @@ def cmd_log_hours(args):
         if not project:
             return
 
+    rate = get_project_rate(config, project)
+    earned = hours * rate
+
     if date_range:
         start, end = date_range
         days = (end - start).days + 1
@@ -761,171 +783,74 @@ def cmd_log_hours(args):
         count = 0
         current = start
         while current <= end:
-            log_entry(current, hours, project, desc)
+            log_entry(current, hours, project, desc, earned)
             count += 1
             current += timedelta(days=1)
         desc_label = f" ({desc})" if desc else ""
         print(f"Logged {hours}h for {project_color(project)}{project}{RESET} on {count} days ({start.isoformat()} to {end.isoformat()}){desc_label}")
         git_sync(f"log {hours}h {project} {start.isoformat()}..{end.isoformat()}")
     else:
-        log_entry(entry_date, hours, project, desc)
+        log_entry(entry_date, hours, project, desc, earned)
         day_label = "today" if entry_date == date.today() else entry_date.isoformat()
         desc_label = f" ({desc})" if desc else ""
         print(f"Logged {hours}h for {project_color(project)}{project}{RESET} on {day_label}{desc_label}")
         git_sync(f"log {hours}h {project} {entry_date.isoformat()}")
 
 
+MONTH_NAMES = {
+    "jan": "01", "january": "01", "feb": "02", "february": "02",
+    "mar": "03", "march": "03", "apr": "04", "april": "04",
+    "may": "05", "jun": "06", "june": "06", "jul": "07", "july": "07",
+    "aug": "08", "august": "08", "sep": "09", "september": "09",
+    "oct": "10", "october": "10", "nov": "11", "november": "11",
+    "dec": "12", "december": "12",
+}
+
 def parse_sum_filters(args):
     """Parse month/project filters from args. Returns (month_filter, project_filter)."""
     month_filter = None
     project_filter = None
 
-    MONTH_NAMES = {
-        "jan": "01", "january": "01", "feb": "02", "february": "02",
-        "mar": "03", "march": "03", "apr": "04", "april": "04",
-        "may": "05", "jun": "06", "june": "06", "jul": "07", "july": "07",
-        "aug": "08", "august": "08", "sep": "09", "september": "09",
-        "oct": "10", "october": "10", "nov": "11", "november": "11",
-        "dec": "12", "december": "12",
-    }
-
     for arg in args:
-        if arg.lower() in MONTH_NAMES:
+        if arg.lower() == "all":
+            month_filter = "all"
+        elif arg.lower() in MONTH_NAMES:
             month_filter = f"{date.today().year}-{MONTH_NAMES[arg.lower()]}"
         elif len(arg) == 2 and arg.isdigit():
             month_filter = f"{date.today().year}-{arg}"
         elif len(arg) >= 4 and arg[:4].isdigit():
             month_filter = arg
-        elif arg.lower() == "all":
-            # "all" = all time if no month yet, all projects if month already set
-            if month_filter:
-                project_filter = "all"
-            else:
-                month_filter = "all"
         else:
             project_filter = arg
 
     return month_filter, project_filter
 
 
-def cmd_sum(args):
-    entries = load_entries()
-    if not entries:
-        print("No entries yet.")
-        return
-
-    month_filter, project_filter = parse_sum_filters(args)
-
-    # Auto-detect project from cwd unless "all" overrides it
-    auto_project = False
-    all_projects = False
-    if project_filter == "all":
-        project_filter = None  # Explicit "all" = no project filter
-        all_projects = True
-    elif not project_filter:
-        config = load_config()
-        detected = detect_project(config)
-        if detected:
-            project_filter = detected
-            auto_project = True
-        else:
-            # Unmapped directory — offer to map it, or show all
-            mapped = ask_project(config)
-            if mapped:
-                project_filter = mapped
-                auto_project = True
-            else:
-                all_projects = True
-
-    # Interactive mode if no args
-    if not args:
-        months = sorted(set(e["date"][:7] for e in entries), reverse=True)
-        projects = sorted(set(e["project"] for e in entries))
-
-        options = []
-        for m in months[:6]:
-            try:
-                label = datetime.strptime(m, "%Y-%m").strftime("%B %Y")
-            except ValueError:
-                label = m
-            options.append((m, label))
-        options.append(("all", "All time"))
-
-        print("\nTime period:")
-        for i, (_, label) in enumerate(options, 1):
-            print(f"  {i}. {label}")
-
-        try:
-            choice = input("\nPick [1]: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return
-
-        idx = int(choice) - 1 if choice else 0
-        if idx < 0 or idx >= len(options):
-            print("Invalid choice.")
-            return
-
-        picked_key = options[idx][0]
-        if picked_key != "all":
-            month_filter = picked_key
-
-        # Project filter (skip if already detected from cwd)
-        if auto_project and project_filter:
-            pass
-        elif len(projects) > 1:
-            print("\nProject:")
-            print("  0. All projects")
-            for i, p in enumerate(projects, 1):
-                print(f"  {i}. {p}")
-
-            try:
-                choice = input("\nPick [0]: ").strip()
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return
-
-            if choice and not choice.isdigit():
-                match = [p for p in projects if p.lower() == choice.lower()]
-                if match:
-                    project_filter = match[0]
-                else:
-                    print(f"Unknown project: {choice}")
-                    return
-            else:
-                idx = int(choice) if choice else 0
-                if idx > 0 and idx <= len(projects):
-                    project_filter = projects[idx - 1]
-
-    # Filter
+def _render_sum(entries, month_filter, project_filter):
+    """Render sum view. Returns (total, by_project, config, currency)."""
     filtered = entries
-    if month_filter and month_filter != "all":
+    if month_filter:
         filtered = [e for e in filtered if e["date"].startswith(month_filter)]
     if project_filter:
-            filtered = [e for e in filtered if e["project"] == project_filter]
+        filtered = [e for e in filtered if e["project"] == project_filter]
 
     if not filtered:
         print("No entries match.")
-        return
+        return None
 
-    # Build day-indexed data: aggregate hours per date (multiple entries possible)
     config = load_config()
     currency = get_currency(config)
     by_date = {}
     for e in filtered:
-        by_date.setdefault(e["date"], {"hours": 0, "earned": 0, "projects": [], "descs": []})
+        by_date.setdefault(e["date"], {"hours": 0, "earned": 0, "entries": []})
         by_date[e["date"]]["hours"] += e["hours"]
-        by_date[e["date"]]["earned"] += e["hours"] * get_project_rate(config, e["project"])
-        if e["project"] not in by_date[e["date"]]["projects"]:
-            by_date[e["date"]]["projects"].append(e["project"])
-        if e.get("desc"):
-            by_date[e["date"]]["descs"].append(e["desc"])
+        by_date[e["date"]]["earned"] += get_entry_earned(e)
+        by_date[e["date"]]["entries"].append((e["project"], e.get("desc", "")))
 
     sorted_dates = sorted(by_date.keys())
 
     # Determine date range for display
-    if month_filter and month_filter != "all" and len(month_filter) == 7:
-        # Full month range
+    if month_filter and len(month_filter) == 7:
         year, month = int(month_filter[:4]), int(month_filter[5:])
         first = date(year, month, 1)
         if month == 12:
@@ -940,23 +865,23 @@ def cmd_sum(args):
     print()
     current = first
     while current <= last:
-        weekday = current.weekday()
-
         iso = current.isoformat()
-        day_name = DAY_NAMES[weekday]
+        day_name = DAY_NAMES[current.weekday()]
 
         if iso in by_date:
             info = by_date[iso]
             earned_str = f"  ({info['earned']:,.0f} {currency})" if info["earned"] > 0 and currency else ""
-            proj_str = ", ".join(f"{project_color(p)}{p}{RESET}" for p in info["projects"])
-            desc_str = f"  {', '.join(info['descs'])}" if info["descs"] else ""
-            print(f"  {iso}  {day_name}  {info['hours']:5.1f}h{earned_str}  {proj_str}{desc_str}")
-        elif month_filter:  # Show gaps when viewing a time period
-            in_range = True
-            if month_filter != "all":
-                in_range = iso.startswith(month_filter)
-            if in_range:
-                print(f"  {iso}  {day_name}      —")
+            parts = []
+            for proj, desc in info["entries"]:
+                c = project_color(proj)
+                if desc:
+                    parts.append(f"{c}{proj}{RESET}: {desc}")
+                else:
+                    parts.append(f"{c}{proj}{RESET}")
+            detail_str = ", ".join(parts)
+            print(f"  {iso}  {day_name}  {info['hours']:5.1f}h{earned_str}  {detail_str}")
+        elif month_filter:
+            print(f"  {iso}  {day_name}      —")
 
         current += timedelta(days=1)
 
@@ -968,40 +893,38 @@ def cmd_sum(args):
         by_project[e["project"]] += e["hours"]
 
     # Header
-    parts = []
-    if month_filter and month_filter != "all":
+    if month_filter:
         try:
-            parts.append(datetime.strptime(month_filter, "%Y-%m").strftime("%B %Y"))
+            month_label = datetime.strptime(month_filter, "%Y-%m").strftime("%B %Y")
         except ValueError:
-            parts.append(month_filter)
+            month_label = month_filter
+    else:
+        month_label = "all time"
     if project_filter:
-        parts.append(project_filter)
-    header = " / ".join(parts) if parts else "All time"
+        c = project_color(project_filter)
+        header = f"{month_label} / {c}{project_filter}{RESET}"
+    else:
+        header = f"{month_label} / all projects"
 
-    # Calculate earnings
+    # Calculate earnings from stored values
     total_earned = 0
     earnings = {}
-    for proj, hours in by_project.items():
-        rate = get_project_rate(config, proj)
-        earned = hours * rate
-        earnings[proj] = (hours, rate, earned)
+    for proj in by_project:
+        earnings[proj] = 0
+    for e in filtered:
+        earned = get_entry_earned(e)
+        earnings[e["project"]] += earned
         total_earned += earned
 
     print()
-    if auto_project:
-        rate = get_project_rate(config, project_filter)
-        rate_str = f" @ {rate} {currency}/h" if rate and currency else ""
-        c = project_color(project_filter)
-        print(f"  (filtered by {c}{project_filter}{RESET}{rate_str})")
-    elif all_projects:
-        print(f"  (all projects)")
     if total_earned > 0 and currency:
         print(f"  {header}: {total}h ({total_earned:,.0f} {currency})")
     else:
         print(f"  {header}: {total}h")
     if len(by_project) > 1:
         for proj in sorted(by_project):
-            h, rate, earned = earnings[proj]
+            h = by_project[proj]
+            earned = earnings[proj]
             c = project_color(proj)
             if earned > 0 and currency:
                 print(f"    {c}{proj}: {h}h ({earned:,.0f} {currency}){RESET}")
@@ -1009,9 +932,58 @@ def cmd_sum(args):
                 print(f"    {c}{proj}: {h}h{RESET}")
 
     # Copy total hours to clipboard
-    if copy_to_clipboard(str(total)):
+    copy_to_clipboard(str(total))
+    print(f"  ({total} copied to clipboard)")
+
+    return sorted(by_project.keys())
+
+
+def cmd_sum(args):
+    entries = load_entries()
+    if not entries:
+        print("No entries yet.")
+        return
+
+    month_filter, project_filter = parse_sum_filters(args)
+
+    # Default to current month (unless "all" was specified)
+    if not month_filter:
+        month_filter = date.today().strftime("%Y-%m")
+    elif month_filter == "all":
+        month_filter = None
+
+    projects = _render_sum(entries, month_filter, project_filter)
+    if not projects:
+        return
+
+    # Drill-down: offer to filter by project if showing multiple
+    while not project_filter and len(projects) > 1:
         print()
-        print(f"  ({total} copied to clipboard)")
+        for i, p in enumerate(projects, 1):
+            c = project_color(p)
+            print(f"  {i}. {c}{p}{RESET}")
+        print()
+        try:
+            choice = input("  Show project (Enter to skip): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        if not choice:
+            break
+        # Accept number or label text
+        if choice.isdigit():
+            idx = int(choice)
+            if 1 <= idx <= len(projects):
+                _render_sum(entries, month_filter, projects[idx - 1])
+            else:
+                print("  Invalid choice.")
+        else:
+            match = [p for p in projects if p.lower() == choice.lower()]
+            if match:
+                _render_sum(entries, month_filter, match[0])
+            else:
+                print(f"  Unknown project: {choice}")
+
     print()
 
 
@@ -1035,8 +1007,7 @@ def cmd_last(args):
     for e in filtered:
         d = e["date"]
         weekday = DAY_NAMES[date.fromisoformat(d).weekday()]
-        rate = get_project_rate(config, e["project"])
-        earned = e["hours"] * rate
+        earned = get_entry_earned(e)
         earned_str = f"  ({earned:,.0f} {currency})" if earned > 0 and currency else ""
         desc_str = f"  {e['desc']}" if e.get("desc") else ""
         c = project_color(e["project"])
@@ -1168,8 +1139,11 @@ simple time logger
 
   zeit <hours> [date] [description]   Log hours (default: today)
   zeit <hours> <start>..<end> [desc]  Log hours for a date range
-  zeit sum [month] [project]          Show entries + total (auto-filters by cwd)
-  zeit sum march all                  Show all projects for a month
+  zeit sum [month] [project]          Show entries + total (default: current month)
+  zeit sum march                      Specific month, all projects
+  zeit sum slidesgpt                  Current month, specific project
+  zeit sum march slidesgpt            Specific month and project
+  zeit sum slidesgpt all              All entries for a project
   zeit last [n]                       Show last n entries (default: 10)
   zeit status                         Activity overview for the current month
   zeit undo                           Remove last entry
@@ -1185,8 +1159,8 @@ simple time logger
 Date formats:
   today, yesterday, -2 (days ago), monday, 03-28, 2026-03-28
 
-Month filters for sum:
-  zeit sum april | zeit sum 04 | zeit sum 2026-04 | zeit sum all
+Month formats for sum:
+  zeit sum april | zeit sum 04 | zeit sum 2026-04
 """.rstrip()
 
 
