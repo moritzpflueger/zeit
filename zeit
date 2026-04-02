@@ -660,7 +660,7 @@ def cmd_config(_args):
         remote = "git not installed"
     options.append(("sync", f"GitHub sync ({remote})"))
 
-    options.append(("symlink", "Reinstall symlink"))
+    options.append(("symlink", "Install `zeit` command in PATH"))
 
     # Show project options if cwd is already mapped
     cwd = os.getcwd()
