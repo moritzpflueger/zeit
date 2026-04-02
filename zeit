@@ -1104,9 +1104,111 @@ def cmd_rm(args):
     git_sync(f"rm {count} entries on {target_iso}")
 
 
-def cmd_edit(_args):
-    editor = os.environ.get("EDITOR", "nano")
-    subprocess.run([editor, str(LOG_FILE)])
+def _edit_entries(filtered, entries, all_idx):
+    """Let user pick an entry to edit from a filtered list. all_idx maps filtered index to entries index."""
+    config = load_config()
+    currency = get_currency(config)
+
+    print()
+    for i, e in enumerate(filtered, 1):
+        d = e["date"]
+        weekday = DAY_NAMES[date.fromisoformat(d).weekday()]
+        earned = get_entry_earned(e)
+        earned_str = f"  ({earned:,.0f} {currency})" if earned > 0 and currency else ""
+        desc_str = f"  {e['desc']}" if e.get("desc") else ""
+        c = project_color(e["project"])
+        print(f"  {i}. {d}  {weekday}  {e['hours']:5.1f}h{earned_str}  {c}{e['project']}{RESET}{desc_str}")
+    print()
+
+    try:
+        choice = input("  Edit which? (Ctrl+C or Enter to cancel):").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if not choice or not choice.isdigit():
+        return
+    idx = int(choice)
+    if idx < 1 or idx > len(filtered):
+        print("  Invalid choice.")
+        return
+
+    entry = filtered[idx - 1]
+    entry_idx = all_idx[idx - 1]
+    print(f"\n  Editing: {entry['date']}  {entry['hours']}h  {entry['project']}  {entry.get('desc', '')}")
+    print(f"  Leave blank to keep current value.\n")
+
+    try:
+        new_hours = input(f"  Hours [{entry['hours']}]:").strip()
+        new_desc = input(f"  Description [{entry.get('desc', '')}]:").strip()
+        new_date = input(f"  Date [{entry['date']}]:").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\n  Cancelled.")
+        return
+
+    if new_hours:
+        old_hours = entries[entry_idx]["hours"]
+        old_earned = entries[entry_idx].get("earned", 0)
+        entries[entry_idx]["hours"] = float(new_hours)
+        # Recalculate earned using the rate baked into the entry
+        if old_hours > 0 and old_earned > 0:
+            rate = old_earned / old_hours
+            entries[entry_idx]["earned"] = float(new_hours) * rate
+    if new_desc:
+        entries[entry_idx]["desc"] = new_desc
+    if new_date:
+        parsed = try_parse_date(new_date)
+        if parsed:
+            entries[entry_idx]["date"] = parsed.isoformat()
+        else:
+            print(f"  Can't parse date: {new_date}")
+            return
+
+    save_entries(entries)
+    e = entries[entry_idx]
+    c = project_color(e["project"])
+    earned = get_entry_earned(e)
+    currency = get_currency(config) if new_hours else get_currency(load_config())
+    earned_str = f"  ({earned:,.0f} {currency})" if earned > 0 and currency else ""
+    print(f"  Updated: {e['date']}  {e['hours']}h{earned_str}  {c}{e['project']}{RESET}  {e.get('desc', '')}")
+    git_sync("edit entry")
+
+
+def cmd_edit(args):
+    entries = load_entries()
+    if not entries:
+        print("No entries yet.")
+        return
+
+    # "zeit edit" or "zeit edit last" or "zeit edit <n>"
+    if not args or args[0] == "last" or args[0].isdigit():
+        n = 10
+        if args and args[0].isdigit():
+            n = int(args[0])
+        elif len(args) > 1 and args[1].isdigit():
+            n = int(args[1])
+        filtered = entries[-n:]
+        all_idx = list(range(len(entries) - n, len(entries)))
+        _edit_entries(filtered, entries, all_idx)
+        return
+
+    # "zeit edit <date>"
+    parsed = try_parse_date(args[0])
+    if parsed:
+        target = parsed.isoformat()
+        filtered = []
+        all_idx = []
+        for i, e in enumerate(entries):
+            if e["date"] == target:
+                filtered.append(e)
+                all_idx.append(i)
+        if not filtered:
+            print(f"No entries on {target}.")
+            return
+        _edit_entries(filtered, entries, all_idx)
+        return
+
+    print(f"Unknown argument: {args[0]}")
+    print("Usage: zeit edit, zeit edit last, zeit edit 10, zeit edit <date>")
 
 
 def cmd_list(_args):
@@ -1211,7 +1313,8 @@ simple time logger
   zeit status                         Activity overview for the current month
   zeit undo                           Remove last entry
   zeit rm <date>                      Remove entries on a specific date
-  zeit edit                           Open log in $EDITOR
+  zeit edit [n]                        Edit from last n entries (default: 10)
+  zeit edit <date>                    Edit entries on a specific date
   zeit list                           Show projects with directories and rates
   zeit sync                           Manual GitHub sync
   zeit init                           First-time setup

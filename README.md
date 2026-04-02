@@ -81,7 +81,9 @@ Shows all entries with weekday, daily earnings (if currency is set), gap markers
 zeit undo                # Remove last entry
 zeit rm yesterday        # Remove entries on a specific date
 zeit rm 2026-04-01       # Same with explicit date
-zeit edit                # Open zeit.csv in $EDITOR
+zeit edit                # Edit from last 10 entries
+zeit edit 30             # Edit from last 30 entries
+zeit edit yesterday      # Edit entries on a specific date
 ```
 
 ### Other commands
