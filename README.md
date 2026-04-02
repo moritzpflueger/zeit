@@ -19,8 +19,9 @@ zeit init
 ### Git clone (recommended)
 
 ```bash
-git clone https://github.com/moritzpflueger/zeit.git ~/zeit
-~/zeit/zeit init
+git clone https://github.com/moritzpflueger/zeit.git
+cd zeit
+./zeit init
 ```
 
 Cloning makes updates easy with `git pull`.
@@ -28,8 +29,8 @@ Cloning makes updates easy with `git pull`.
 ### Update
 
 ```bash
-zeit update        # curl installs — checks for new version
-cd ~/zeit && git pull   # git installs
+zeit update              # curl installs — checks for new version
+cd <your-zeit-dir> && git pull  # git installs
 ```
 
 `zeit init` walks you through first-time setup:
