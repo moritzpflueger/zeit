@@ -252,19 +252,12 @@ def save_entries(entries):
 
 # ── Git sync ────────────────────────────────────────────────────────────────
 
-def _update_data_readme():
-    """Regenerate README.md in the data repo with current stats."""
-    entries = load_entries()
-    if not entries:
-        return
-
-    config = load_config()
-    currency = get_currency(config)
+def _build_status(entries, config):
+    """Build activity overview. Returns (month_label, by_project, total_month, total_all)."""
     today = date.today()
     current_month = today.strftime("%Y-%m")
     month_label = today.strftime("%B %Y")
 
-    # Current month entries by project
     month_entries = [e for e in entries if e["date"].startswith(current_month)]
     by_project = {}
     for e in month_entries:
@@ -273,6 +266,65 @@ def _update_data_readme():
 
     total_all = sum(e["hours"] for e in entries)
     total_month = sum(by_project.values())
+
+    return month_label, by_project, total_month, total_all
+
+
+def _render_status_bars(by_project, bar_width=10):
+    """Render project bar chart lines. Returns list of strings."""
+    if not by_project:
+        return []
+    max_hours = max(by_project.values())
+    lines = []
+    for proj in sorted(by_project, key=by_project.get, reverse=True):
+        hours = by_project[proj]
+        filled = round(hours / max_hours * bar_width)
+        bar = "█" * filled + "░" * (bar_width - filled)
+        lines.append(f"  {proj:<20} {bar}  {hours:g}h")
+    return lines
+
+
+def cmd_status(_args):
+    entries = load_entries()
+    if not entries:
+        print("No entries yet.")
+        return
+
+    config = load_config()
+    currency = get_currency(config)
+    month_label, by_project, total_month, total_all = _build_status(entries, config)
+
+    PINK = "\033[35m"
+    BLUE = "\033[34m"
+    RESET = "\033[0m"
+
+    print()
+    print(f"  {PINK}{month_label}{RESET}")
+    print()
+    for line in _render_status_bars(by_project):
+        print(f"  {line}")
+    print()
+    summary = f"  {total_month:g}h this month"
+    if total_all != total_month:
+        summary += f" · {total_all:g}h all time"
+    if total_month and currency:
+        total_earned = 0
+        for proj, hours in by_project.items():
+            total_earned += hours * get_project_rate(config, proj)
+        if total_earned:
+            summary += f" · {total_earned:,.0f} {currency}"
+    print(f"  {BLUE}{summary}{RESET}")
+    print()
+
+
+def _update_data_readme():
+    """Regenerate README.md in the data repo with current stats."""
+    entries = load_entries()
+    if not entries:
+        return
+
+    config = load_config()
+    month_label, by_project, total_month, total_all = _build_status(entries, config)
 
     lines = [
         "# zeit-data",
@@ -283,14 +335,9 @@ def _update_data_readme():
         "",
     ]
 
+    for bar_line in _render_status_bars(by_project):
+        lines.append(f"  {bar_line}")
     if by_project:
-        max_hours = max(by_project.values()) if by_project else 1
-        bar_width = 10
-        for proj in sorted(by_project, key=by_project.get, reverse=True):
-            hours = by_project[proj]
-            filled = round(hours / max_hours * bar_width)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            lines.append(f"    {proj:<20} {bar}  {hours:g}h")
         lines.append("")
 
     summary = f"**{month_label}: {total_month:g}h**"
@@ -600,6 +647,7 @@ def cmd_config(_args):
     if action == "currency":
         config = _setup_currency(config)
         save_config(config)
+        git_sync("update config")
     elif action == "sync":
         _setup_git_sync()
     elif action == "symlink":
@@ -1086,6 +1134,7 @@ zeit — simple time logger
   zeit sum [month] [project]          Show entries + total (auto-filters by cwd)
   zeit sum march all                  Show all projects for a month
   zeit last [n]                       Show last n entries (default: 10)
+  zeit status                         Activity overview for the current month
   zeit undo                           Remove last entry
   zeit rm <date>                      Remove entries on a specific date
   zeit edit                           Open log in $EDITOR
@@ -1136,6 +1185,7 @@ def main():
         "edit": cmd_edit,
         "list": cmd_list,
         "last": cmd_last,
+        "status": cmd_status,
         "sync": cmd_sync,
         "config": cmd_config,
     }
