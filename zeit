@@ -528,6 +528,10 @@ def _setup_symlink():
     """Create symlink in PATH."""
     source = SCRIPT_DIR / "zeit"
     target = Path.home() / ".local" / "bin" / "zeit"
+    # Skip if the script is already in the target location (curl install)
+    if source.resolve() == target.resolve() or source == target:
+        print(f"  Already in PATH ({target})")
+        return
     target.parent.mkdir(parents=True, exist_ok=True)
     if target.exists() or target.is_symlink():
         target.unlink()
