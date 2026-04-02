@@ -7,11 +7,29 @@
 
 Simple time logger for the terminal. No timers, no start/stop — just log how many hours you worked and move on. Built for people who eyeball their time or keep forgetting to stop timers.
 
-## Setup
+## Install
+
+### Quick install (curl)
 
 ```bash
-git clone git@github.com:moritzpflueger/zeit ~/zeit
+curl -fsSL https://raw.githubusercontent.com/moritzpflueger/zeit/main/zeit -o ~/.local/bin/zeit && chmod +x ~/.local/bin/zeit
+zeit init
+```
+
+### Git clone (recommended)
+
+```bash
+git clone https://github.com/moritzpflueger/zeit.git ~/zeit
 ~/zeit/zeit init
+```
+
+Cloning makes updates easy with `git pull`.
+
+### Update
+
+```bash
+zeit update        # curl installs — checks for new version
+cd ~/zeit && git pull   # git installs
 ```
 
 `zeit init` walks you through first-time setup:
