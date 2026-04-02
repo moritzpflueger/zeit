@@ -1,4 +1,9 @@
-# zeit
+```
+ ▄▄▄▄▄  ▄▄▄▄  ▄  ▄▄▄
+   ▄▄▀  █▄▄▄  █   █
+ ▄▀▀    █▄▄▄  █   █
+ ▀▀▀▀▀  ▀▀▀▀  ▀   ▀
+```
 
 Simple time logger for the terminal. No timers, no start/stop — just log how many hours you worked and move on. Built for people who eyeball their time or keep forgetting to stop timers.
 
@@ -49,12 +54,15 @@ Shows all entries with weekday, daily earnings (if currency is set), gap markers
 zeit undo                # Remove last entry
 zeit rm yesterday        # Remove entries on a specific date
 zeit rm 2026-04-01       # Same with explicit date
-zeit edit                # Open log.csv in $EDITOR
+zeit edit                # Open zeit.csv in $EDITOR
 ```
 
 ### Other commands
 
 ```bash
+zeit status              # Activity overview for the current month
+zeit last                # Last 10 entries
+zeit last 20             # Last 20 entries
 zeit list                # Show projects, directories, rates
 zeit sync                # Manual GitHub sync
 zeit config              # Change settings (currency, sync, symlink)
@@ -64,7 +72,7 @@ zeit --version           # Version
 
 ## How it works
 
-- **Data:** `~/.zeit/log.csv` — one row per entry (date, hours, project, description)
+- **Data:** `~/.zeit/zeit.csv` — one row per entry (date, hours, project, description)
 - **Config:** `~/.zeit/config.json` — maps directory prefixes to project labels, optional hourly rates and currency
 - **Sync:** Auto-commits and pushes to your private GitHub repo after every write (if configured)
 
