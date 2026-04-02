@@ -1,0 +1,1102 @@
+#!/usr/bin/env python3
+"""zeit — simple time logger from the terminal."""
+
+import csv
+import json
+import os
+import shutil
+import subprocess
+import sys
+from datetime import datetime, date, timedelta
+from pathlib import Path
+
+VERSION = "1.0.0"
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+DATA_DIR = Path.home() / ".zeit"
+LOG_FILE = DATA_DIR / "log.csv"
+CONFIG_FILE = DATA_DIR / "config.json"
+
+DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+# ── Helpers ────────────────────────────────────────────────────────────────
+
+def is_configured():
+    return CONFIG_FILE.exists()
+
+def get_currency(config):
+    return config.get("currency", "")
+
+def copy_to_clipboard(text):
+    """Copy text to clipboard. Returns True on success."""
+    commands = [
+        ["pbcopy"],                             # macOS
+        ["xclip", "-selection", "clipboard"],    # Linux (X11)
+        ["xsel", "--clipboard", "--input"],      # Linux (X11)
+        ["wl-copy"],                             # Linux (Wayland)
+        ["clip.exe"],                            # Windows / WSL
+    ]
+    for cmd in commands:
+        if shutil.which(cmd[0]):
+            try:
+                subprocess.run(cmd, input=text, text=True, capture_output=True)
+                return True
+            except FileNotFoundError:
+                continue
+    return False
+
+# ── Config ──────────────────────────────────────────────────────────────────
+
+def load_config():
+    if CONFIG_FILE.exists():
+        return json.loads(CONFIG_FILE.read_text())
+    return {"projects": {}}
+
+def save_config(config):
+    CONFIG_FILE.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n")
+
+# ── Project detection ───────────────────────────────────────────────────────
+
+def get_project_label(config, prefix):
+    """Get label from project entry (supports old string and new dict format)."""
+    entry = config.get("projects", {}).get(prefix)
+    if isinstance(entry, dict):
+        return entry.get("label", "")
+    return entry or ""
+
+def get_project_rate(config, label):
+    """Get hourly rate for a project label."""
+    for entry in config.get("projects", {}).values():
+        if isinstance(entry, dict) and entry.get("label") == label:
+            return entry.get("rate", 0)
+    return 0
+
+def detect_project(config):
+    cwd = os.getcwd()
+    best_match = ""
+    best_label = None
+    for prefix in config.get("projects", {}):
+        if cwd.startswith(prefix) and len(prefix) > len(best_match):
+            best_match = prefix
+            best_label = get_project_label(config, prefix)
+    return best_label
+
+def ask_project(config):
+    """Interactive project picker. Returns label or None if cancelled."""
+    cwd = os.getcwd()
+    currency = get_currency(config)
+
+    # Collect existing labels from config and log history
+    existing = {}
+    for entry in config.get("projects", {}).values():
+        if isinstance(entry, dict):
+            label = entry.get("label", "")
+            rate = entry.get("rate", 0)
+            if label and label not in existing:
+                existing[label] = rate
+    for entry in load_entries():
+        label = entry["project"]
+        if label and label not in existing:
+            existing[label] = 0
+
+    try:
+        print(f"\nUnknown project directory: {cwd}\n")
+        sorted_labels = sorted(existing.keys())
+        if sorted_labels:
+            for i, label in enumerate(sorted_labels, 1):
+                rate = existing[label]
+                rate_str = f"  ({rate} {currency}/h)" if rate and currency else ""
+                print(f"  {i}. {label}{rate_str}")
+            print(f"  0. New project")
+            print()
+            choice = input("Pick (or Enter to cancel): ").strip()
+            if not choice:
+                return None
+            # Accept label text as well as number
+            if not choice.isdigit():
+                match = [l for l in sorted_labels if l.lower() == choice.lower()]
+                if match:
+                    label = match[0]
+                    config["projects"][cwd] = {"label": label, "rate": existing[label]}
+                    save_config(config)
+                    print(f"Mapped {cwd} → {label}")
+                    return label
+                print(f"  Unknown label: {choice}")
+                return None
+            idx = int(choice)
+            if idx == 0:
+                label = _create_new_project(config, cwd)
+            elif 1 <= idx <= len(sorted_labels):
+                label = sorted_labels[idx - 1]
+                config["projects"][cwd] = {"label": label, "rate": existing[label]}
+                save_config(config)
+                print(f"Mapped {cwd} → {label}")
+            else:
+                print("Invalid choice.")
+                return None
+        else:
+            label = _create_new_project(config, cwd)
+            if not label:
+                return None
+    except (EOFError, KeyboardInterrupt):
+        print("\nCancelled.")
+        return None
+
+    return label
+
+
+def _create_new_project(config, cwd):
+    """Create a new project label and map it. Returns label or None."""
+    currency = get_currency(config)
+    label = input("Project label: ").strip()
+    if not label:
+        return None
+    if currency:
+        rate_str = input(f"Hourly rate ({currency}, Enter to skip): ").strip()
+        rate = float(rate_str) if rate_str else 0
+    else:
+        rate = 0
+    config["projects"][cwd] = {"label": label, "rate": rate}
+    save_config(config)
+    if rate and currency:
+        print(f"Mapped {cwd} → {label} ({rate} {currency}/h)")
+    else:
+        print(f"Mapped {cwd} → {label}")
+    return label
+
+# ── Date parsing ────────────────────────────────────────────────────────────
+
+WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+    "mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6,
+}
+
+def try_parse_date(arg):
+    """Try to parse arg as a date. Returns date or None."""
+    if arg is None:
+        return date.today()
+
+    if arg == "yesterday":
+        return date.today() - timedelta(days=1)
+
+    if arg == "today":
+        return date.today()
+
+    # Negative offset: -1, -2, etc.
+    if arg.startswith("-") and arg[1:].isdigit():
+        return date.today() - timedelta(days=int(arg[1:]))
+
+    # Weekday name: monday, tue, etc.
+    if arg.lower() in WEEKDAYS:
+        target = WEEKDAYS[arg.lower()]
+        today = date.today()
+        days_back = (today.weekday() - target) % 7
+        if days_back == 0:
+            days_back = 7  # "monday" means last monday, not today
+        return today - timedelta(days=days_back)
+
+    # MM-DD (current year)
+    try:
+        d = datetime.strptime(arg, "%m-%d").date().replace(year=date.today().year)
+        return d
+    except ValueError:
+        pass
+
+    # YYYY-MM-DD
+    try:
+        return datetime.strptime(arg, "%Y-%m-%d").date()
+    except ValueError:
+        pass
+
+    return None
+
+def parse_date(arg):
+    """Parse date or exit with error."""
+    result = try_parse_date(arg)
+    if result is None:
+        print(f"Can't parse date: {arg}")
+        print("Try: yesterday, -2, monday, 03-28, 2026-03-28")
+        sys.exit(1)
+    return result
+
+# ── CSV operations ──────────────────────────────────────────────────────────
+
+def log_entry(entry_date, hours, project, desc=""):
+    with open(LOG_FILE, "a", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([entry_date.isoformat(), hours, project, desc])
+
+def load_entries():
+    if not LOG_FILE.exists():
+        return []
+    entries = []
+    with open(LOG_FILE, newline="") as f:
+        reader = csv.reader(f)
+        for row in reader:
+            if len(row) >= 3:
+                entries.append({
+                    "date": row[0],
+                    "hours": float(row[1]),
+                    "project": row[2],
+                    "desc": row[3] if len(row) >= 4 else "",
+                })
+    return entries
+
+def save_entries(entries):
+    with open(LOG_FILE, "w", newline="") as f:
+        writer = csv.writer(f)
+        for e in entries:
+            writer.writerow([e["date"], e["hours"], e["project"], e.get("desc", "")])
+
+
+# ── Git sync ────────────────────────────────────────────────────────────────
+
+def git_sync(message="update log"):
+    try:
+        result = subprocess.run(
+            ["git", "remote"], capture_output=True, text=True, cwd=DATA_DIR
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            return  # No git or no remote, skip silently
+
+        print("Syncing...", end=" ", flush=True)
+        subprocess.run(["git", "add", "-A"], capture_output=True, cwd=DATA_DIR)
+        subprocess.run(
+            ["git", "commit", "-m", message],
+            capture_output=True, cwd=DATA_DIR,
+        )
+        result = subprocess.run(
+            ["git", "push"], capture_output=True, text=True, cwd=DATA_DIR
+        )
+        if result.returncode == 0:
+            print("done")
+        else:
+            print("failed (will retry on next log)")
+    except FileNotFoundError:
+        pass  # git not installed
+
+# ── Init & Config ──────────────────────────────────────────────────────────
+
+def _setup_currency(config):
+    """Ask for currency. Returns updated config."""
+    print("  What currency do you bill in?")
+    currency = input("  Currency (Enter to skip): ").strip().upper()
+    if currency:
+        config["currency"] = currency
+        print(f"  Set to {currency}.")
+    else:
+        config.pop("currency", None)
+        print("  Skipped.")
+    return config
+
+def _setup_git_sync():
+    """Set up git repo in DATA_DIR. Returns True if set up, False if skipped."""
+    has_gh = shutil.which("gh")
+
+    print("  zeit can sync your log data to a private GitHub repo.")
+    print()
+    options = []
+    if has_gh:
+        options.append(("gh", "Create a new private repo with gh"))
+        options.append(("url", "Use an existing repo"))
+        options.append(("skip", "Skip (local only, no sync)"))
+    else:
+        options.append(("url", "Use an existing repo"))
+        options.append(("skip", "Skip (local only, no sync)"))
+
+    for i, (_, label) in enumerate(options, 1):
+        print(f"  {i}. {label}")
+    print()
+
+    default = 1
+    choice_str = input(f"  Pick [{default}]: ").strip()
+    idx = int(choice_str) - 1 if choice_str else default - 1
+    if idx < 0 or idx >= len(options):
+        print("  Invalid choice.")
+        return False
+
+    action = options[idx][0]
+
+    if action == "skip":
+        # Just init a local git repo (no remote)
+        subprocess.run(["git", "init"], capture_output=True, cwd=DATA_DIR)
+        print("  Skipped. You can connect a repo later with `zeit config`.")
+        return False
+
+    if action == "gh":
+        repo_name = input("  Repo name [zeit-data]: ").strip() or "zeit-data"
+        print(f"  Creating {repo_name} (private)...", end=" ", flush=True)
+        result = subprocess.run(
+            ["gh", "repo", "create", repo_name, "--private", "--clone=false"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print("failed")
+            print(f"  {result.stderr.strip()}")
+            return False
+        # Get the full repo URL
+        result = subprocess.run(
+            ["gh", "repo", "view", repo_name, "--json", "sshUrl", "-q", ".sshUrl"],
+            capture_output=True, text=True,
+        )
+        remote_url = result.stdout.strip()
+        if not remote_url:
+            # Fallback to https
+            result = subprocess.run(
+                ["gh", "repo", "view", repo_name, "--json", "url", "-q", ".url"],
+                capture_output=True, text=True,
+            )
+            remote_url = result.stdout.strip()
+        print("done")
+    elif action == "url":
+        print()
+        print("  Create a private repo on github.com/new, then paste the URL.")
+        remote_url = input("  Repo URL: ").strip()
+        if not remote_url:
+            print("  Skipped.")
+            return False
+
+    # Init git and set remote
+    subprocess.run(["git", "init"], capture_output=True, cwd=DATA_DIR)
+
+    # Remove existing origin if any
+    subprocess.run(
+        ["git", "remote", "remove", "origin"],
+        capture_output=True, cwd=DATA_DIR,
+    )
+    subprocess.run(
+        ["git", "remote", "add", "origin", remote_url],
+        capture_output=True, cwd=DATA_DIR,
+    )
+
+    # Initial commit and push
+    subprocess.run(["git", "add", "-A"], capture_output=True, cwd=DATA_DIR)
+    subprocess.run(
+        ["git", "commit", "-m", "init zeit data"],
+        capture_output=True, cwd=DATA_DIR,
+    )
+    print("  Pushing...", end=" ", flush=True)
+    result = subprocess.run(
+        ["git", "push", "-u", "origin", "main"],
+        capture_output=True, text=True, cwd=DATA_DIR,
+    )
+    if result.returncode != 0:
+        # Try master branch
+        result = subprocess.run(
+            ["git", "push", "-u", "origin", "master"],
+            capture_output=True, text=True, cwd=DATA_DIR,
+        )
+    if result.returncode == 0:
+        print("done")
+    else:
+        print("failed (you can push manually later)")
+    return True
+
+def _setup_symlink():
+    """Create symlink in PATH."""
+    source = SCRIPT_DIR / "zeit"
+    target = Path.home() / ".local" / "bin" / "zeit"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() or target.is_symlink():
+        target.unlink()
+    target.symlink_to(source)
+    print(f"  Symlinked {target} → {source}")
+
+    # Check if ~/.local/bin is in PATH
+    path_dirs = os.environ.get("PATH", "").split(os.pathsep)
+    local_bin = str(Path.home() / ".local" / "bin")
+    if local_bin not in path_dirs:
+        print(f"  Note: add {local_bin} to your PATH.")
+
+
+def cmd_init(_args):
+    if is_configured():
+        # Existing config (e.g. cloned data repo on new machine) — just need symlink
+        target = Path.home() / ".local" / "bin" / "zeit"
+        if not target.exists() or not target.is_symlink():
+            print()
+            print("  Config found — looks like a restored setup.")
+            print()
+            _setup_symlink()
+            print()
+            print("  All set! Try: zeit 8")
+            print()
+        else:
+            print("zeit is already configured. Did you mean `zeit config`?")
+        return
+
+    print()
+    print("  Welcome to zeit — a simple time logger.")
+    print()
+
+    # Data directory
+    print("  Data directory")
+    print()
+    if DATA_DIR.exists():
+        print(f"  {DATA_DIR} already exists.")
+    else:
+        DATA_DIR.mkdir(parents=True)
+        print(f"  Created {DATA_DIR}")
+    print()
+
+    # Git sync
+    print("  GitHub sync")
+    print()
+    _setup_git_sync()
+    print()
+
+    # Install symlink
+    print("  Install")
+    print()
+    _setup_symlink()
+    print()
+
+    # Currency (optional, last)
+    config = {"projects": {}}
+    print("  Billing")
+    print()
+    print("  If you bill by the hour, zeit can track what you earn per project.")
+    print("  Set your currency (e.g. USD, $) or skip and add it later with `zeit config`.")
+    print()
+    config = _setup_currency(config)
+    print()
+
+    # First project — map current directory
+    cwd = os.getcwd()
+    print("  First project")
+    print()
+    print(f"  Current directory: {cwd}")
+    print()
+    try:
+        label = input("  Project name (Enter to skip): ").strip()
+        if label:
+            currency = get_currency(config)
+            rate = 0
+            if currency:
+                rate_str = input(f"  Hourly rate for {label} ({currency}, Enter to skip): ").strip()
+                rate = float(rate_str) if rate_str else 0
+            config["projects"][cwd] = {"label": label, "rate": rate}
+            if rate and currency:
+                print(f"  Mapped → {label} ({rate} {currency}/h)")
+            else:
+                print(f"  Mapped → {label}")
+        else:
+            print("  Skipped. zeit will ask when you first log hours.")
+    except (EOFError, KeyboardInterrupt):
+        print()
+    print()
+
+    # Save config (this marks init as complete)
+    save_config(config)
+
+    print("  All set! Try: zeit 8")
+    print()
+
+
+def cmd_config(_args):
+    if not is_configured():
+        print("zeit is not configured yet. Run `zeit init` to get started.")
+        return
+
+    config = load_config()
+    currency = get_currency(config)
+
+    print()
+    options = []
+    currency_label = currency if currency else "not set"
+    options.append(("currency", f"Currency ({currency_label})"))
+
+    # Check current git remote
+    try:
+        result = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            capture_output=True, text=True, cwd=DATA_DIR,
+        )
+        remote = result.stdout.strip() if result.returncode == 0 else "not set"
+    except FileNotFoundError:
+        remote = "git not installed"
+    options.append(("sync", f"GitHub sync ({remote})"))
+
+    options.append(("symlink", "Reinstall symlink"))
+
+    for i, (_, label) in enumerate(options, 1):
+        print(f"  {i}. {label}")
+    print()
+
+    try:
+        choice_str = input("  Pick (or Enter to cancel): ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    if not choice_str:
+        return
+    idx = int(choice_str) - 1
+    if idx < 0 or idx >= len(options):
+        print("  Invalid choice.")
+        return
+
+    action = options[idx][0]
+    print()
+
+    if action == "currency":
+        config = _setup_currency(config)
+        save_config(config)
+    elif action == "sync":
+        _setup_git_sync()
+    elif action == "symlink":
+        _setup_symlink()
+    print()
+
+
+# ── Commands ────────────────────────────────────────────────────────────────
+
+def cmd_log_hours(args):
+    if not args:
+        print("Usage: zeit <hours> [date] [description]")
+        print("  zeit 5                        → log 5h today")
+        print("  zeit 5 yesterday              → log 5h yesterday")
+        print("  zeit 5 client workshop        → log 5h today, 'client workshop'")
+        print("  zeit 5 monday onsite meeting  → log 5h last Monday, 'onsite meeting'")
+        return
+
+    try:
+        hours = float(args[0])
+    except ValueError:
+        print(f"Not a number: {args[0]}")
+        return
+
+    # Parse: args[1] could be a date, date range, or start of description
+    entry_date = date.today()
+    date_range = None
+    desc_parts = []
+
+    if len(args) > 1:
+        # Check for date range: 04-14..04-18
+        if ".." in args[1]:
+            start_str, end_str = args[1].split("..", 1)
+            start = try_parse_date(start_str)
+            end = try_parse_date(end_str)
+            if start and end:
+                date_range = (start, end)
+                desc_parts = args[2:]
+            else:
+                print(f"Can't parse date range: {args[1]}")
+                return
+        else:
+            parsed = try_parse_date(args[1])
+            if parsed is not None:
+                entry_date = parsed
+                desc_parts = args[2:]
+            else:
+                desc_parts = args[1:]
+
+    desc = " ".join(desc_parts)
+
+    config = load_config()
+    project = detect_project(config)
+    if not project:
+        project = ask_project(config)
+        if not project:
+            return
+
+    if date_range:
+        start, end = date_range
+        days = (end - start).days + 1
+        if days > 7:
+            try:
+                confirm = input(f"Log {hours}h × {days} days for {project}? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if confirm != "y":
+                print("Cancelled.")
+                return
+        count = 0
+        current = start
+        while current <= end:
+            log_entry(current, hours, project, desc)
+            count += 1
+            current += timedelta(days=1)
+        desc_label = f" ({desc})" if desc else ""
+        print(f"Logged {hours}h for {project} on {count} days ({start.isoformat()} to {end.isoformat()}){desc_label}")
+        git_sync(f"log {hours}h {project} {start.isoformat()}..{end.isoformat()}")
+    else:
+        log_entry(entry_date, hours, project, desc)
+        day_label = "today" if entry_date == date.today() else entry_date.isoformat()
+        desc_label = f" ({desc})" if desc else ""
+        print(f"Logged {hours}h for {project} on {day_label}{desc_label}")
+        git_sync(f"log {hours}h {project} {entry_date.isoformat()}")
+
+
+def parse_sum_filters(args):
+    """Parse month/project filters from args. Returns (month_filter, project_filter)."""
+    month_filter = None
+    project_filter = None
+
+    MONTH_NAMES = {
+        "jan": "01", "january": "01", "feb": "02", "february": "02",
+        "mar": "03", "march": "03", "apr": "04", "april": "04",
+        "may": "05", "jun": "06", "june": "06", "jul": "07", "july": "07",
+        "aug": "08", "august": "08", "sep": "09", "september": "09",
+        "oct": "10", "october": "10", "nov": "11", "november": "11",
+        "dec": "12", "december": "12",
+    }
+
+    for arg in args:
+        if arg.lower() in MONTH_NAMES:
+            month_filter = f"{date.today().year}-{MONTH_NAMES[arg.lower()]}"
+        elif len(arg) == 2 and arg.isdigit():
+            month_filter = f"{date.today().year}-{arg}"
+        elif len(arg) >= 4 and arg[:4].isdigit():
+            month_filter = arg
+        elif arg.lower() == "all":
+            # "all" = all time if no month yet, all projects if month already set
+            if month_filter:
+                project_filter = "all"
+            else:
+                month_filter = "all"
+        else:
+            project_filter = arg
+
+    return month_filter, project_filter
+
+
+def cmd_sum(args):
+    entries = load_entries()
+    if not entries:
+        print("No entries yet.")
+        return
+
+    month_filter, project_filter = parse_sum_filters(args)
+
+    # Auto-detect project from cwd unless "all" overrides it
+    auto_project = False
+    all_projects = False
+    if project_filter == "all":
+        project_filter = None  # Explicit "all" = no project filter
+        all_projects = True
+    elif not project_filter:
+        config = load_config()
+        detected = detect_project(config)
+        if detected:
+            project_filter = detected
+            auto_project = True
+        else:
+            # Unmapped directory — offer to map it, or show all
+            mapped = ask_project(config)
+            if mapped:
+                project_filter = mapped
+                auto_project = True
+            else:
+                all_projects = True
+
+    # Interactive mode if no args
+    if not args:
+        months = sorted(set(e["date"][:7] for e in entries), reverse=True)
+        projects = sorted(set(e["project"] for e in entries))
+
+        options = []
+        for m in months[:6]:
+            try:
+                label = datetime.strptime(m, "%Y-%m").strftime("%B %Y")
+            except ValueError:
+                label = m
+            options.append((m, label))
+        options.append(("all", "All time"))
+
+        print("\nTime period:")
+        for i, (_, label) in enumerate(options, 1):
+            print(f"  {i}. {label}")
+
+        try:
+            choice = input("\nPick [1]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+
+        idx = int(choice) - 1 if choice else 0
+        if idx < 0 or idx >= len(options):
+            print("Invalid choice.")
+            return
+
+        picked_key = options[idx][0]
+        if picked_key != "all":
+            month_filter = picked_key
+
+        # Project filter (skip if already detected from cwd)
+        if auto_project and project_filter:
+            pass
+        elif len(projects) > 1:
+            print("\nProject:")
+            print("  0. All projects")
+            for i, p in enumerate(projects, 1):
+                print(f"  {i}. {p}")
+
+            try:
+                choice = input("\nPick [0]: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+
+            if choice and not choice.isdigit():
+                match = [p for p in projects if p.lower() == choice.lower()]
+                if match:
+                    project_filter = match[0]
+                else:
+                    print(f"Unknown project: {choice}")
+                    return
+            else:
+                idx = int(choice) if choice else 0
+                if idx > 0 and idx <= len(projects):
+                    project_filter = projects[idx - 1]
+
+    # Filter
+    filtered = entries
+    if month_filter and month_filter != "all":
+        filtered = [e for e in filtered if e["date"].startswith(month_filter)]
+    if project_filter:
+            filtered = [e for e in filtered if e["project"] == project_filter]
+
+    if not filtered:
+        print("No entries match.")
+        return
+
+    # Build day-indexed data: aggregate hours per date (multiple entries possible)
+    config = load_config()
+    currency = get_currency(config)
+    by_date = {}
+    for e in filtered:
+        by_date.setdefault(e["date"], {"hours": 0, "earned": 0, "projects": [], "descs": []})
+        by_date[e["date"]]["hours"] += e["hours"]
+        by_date[e["date"]]["earned"] += e["hours"] * get_project_rate(config, e["project"])
+        if e["project"] not in by_date[e["date"]]["projects"]:
+            by_date[e["date"]]["projects"].append(e["project"])
+        if e.get("desc"):
+            by_date[e["date"]]["descs"].append(e["desc"])
+
+    sorted_dates = sorted(by_date.keys())
+
+    # Determine date range for display
+    if month_filter and month_filter != "all" and len(month_filter) == 7:
+        # Full month range
+        year, month = int(month_filter[:4]), int(month_filter[5:])
+        first = date(year, month, 1)
+        if month == 12:
+            last = date(year + 1, 1, 1) - timedelta(days=1)
+        else:
+            last = date(year, month + 1, 1) - timedelta(days=1)
+    else:
+        first = date.fromisoformat(sorted_dates[0])
+        last = date.fromisoformat(sorted_dates[-1])
+
+    # Walk all days in the range
+    print()
+    current = first
+    while current <= last:
+        weekday = current.weekday()
+
+        iso = current.isoformat()
+        day_name = DAY_NAMES[weekday]
+
+        if iso in by_date:
+            info = by_date[iso]
+            earned_str = f"  ({info['earned']:,.0f} {currency})" if info["earned"] > 0 and currency else ""
+            proj_str = ", ".join(info["projects"])
+            desc_str = f"  {', '.join(info['descs'])}" if info["descs"] else ""
+            print(f"  {iso}  {day_name}  {info['hours']:5.1f}h{earned_str}  {proj_str}{desc_str}")
+        elif month_filter:  # Show gaps when viewing a time period
+            in_range = True
+            if month_filter != "all":
+                in_range = iso.startswith(month_filter)
+            if in_range:
+                print(f"  {iso}  {day_name}      —")
+
+        current += timedelta(days=1)
+
+    # Totals
+    total = sum(e["hours"] for e in filtered)
+    by_project = {}
+    for e in filtered:
+        by_project.setdefault(e["project"], 0)
+        by_project[e["project"]] += e["hours"]
+
+    # Header
+    parts = []
+    if month_filter and month_filter != "all":
+        try:
+            parts.append(datetime.strptime(month_filter, "%Y-%m").strftime("%B %Y"))
+        except ValueError:
+            parts.append(month_filter)
+    if project_filter:
+        parts.append(project_filter)
+    header = " / ".join(parts) if parts else "All time"
+
+    # Calculate earnings
+    total_earned = 0
+    earnings = {}
+    for proj, hours in by_project.items():
+        rate = get_project_rate(config, proj)
+        earned = hours * rate
+        earnings[proj] = (hours, rate, earned)
+        total_earned += earned
+
+    PINK = "\033[35m"
+    BLUE = "\033[34m"
+    RESET = "\033[0m"
+
+    print()
+    if auto_project:
+        rate = get_project_rate(config, project_filter)
+        rate_str = f" @ {rate} {currency}/h" if rate and currency else ""
+        print(f"  {BLUE}(filtered by {project_filter}{rate_str}){RESET}")
+    elif all_projects:
+        print(f"  {BLUE}(all projects){RESET}")
+    if total_earned > 0 and currency:
+        print(f"  {PINK}{header}: {total}h ({total_earned:,.0f} {currency}){RESET}")
+    else:
+        print(f"  {PINK}{header}: {total}h{RESET}")
+    if len(by_project) > 1:
+        for proj in sorted(by_project):
+            h, rate, earned = earnings[proj]
+            if earned > 0 and currency:
+                print(f"    {PINK}{proj}: {h}h ({earned:,.0f} {currency}){RESET}")
+            else:
+                print(f"    {PINK}{proj}: {h}h{RESET}")
+
+    # Copy total hours to clipboard
+    if copy_to_clipboard(str(total)):
+        print()
+        print(f"  {BLUE}({total} copied to clipboard){RESET}")
+    print()
+
+
+def cmd_last(args):
+    entries = load_entries()
+    if not entries:
+        print("No entries yet.")
+        return
+
+    n = 10
+    if args and args[0].isdigit():
+        n = int(args[0])
+
+    filtered = entries[-n:]
+    config = load_config()
+    currency = get_currency(config)
+
+    PINK = "\033[35m"
+    BLUE = "\033[34m"
+    RESET = "\033[0m"
+
+    print()
+    total = 0
+    total_earned = 0
+    for e in filtered:
+        d = e["date"]
+        weekday = DAY_NAMES[date.fromisoformat(d).weekday()]
+        rate = get_project_rate(config, e["project"])
+        earned = e["hours"] * rate
+        earned_str = f"  ({earned:,.0f} {currency})" if earned > 0 and currency else ""
+        desc_str = f"  {e['desc']}" if e.get("desc") else ""
+        print(f"  {d}  {weekday}  {e['hours']:5.1f}h{earned_str}  {e['project']}{desc_str}")
+        total += e["hours"]
+        total_earned += earned
+
+    print()
+    if total_earned > 0 and currency:
+        print(f"  {PINK}Last {len(filtered)} entries: {total}h ({total_earned:,.0f} {currency}){RESET}")
+    else:
+        print(f"  {PINK}Last {len(filtered)} entries: {total}h{RESET}")
+    print()
+
+
+def cmd_undo(_args):
+    entries = load_entries()
+    if not entries:
+        print("No entries.")
+        return
+    last = entries[-1]
+    desc_str = f"  {last['desc']}" if last.get("desc") else ""
+    print(f"Last entry: {last['date']}  {last['hours']}h  {last['project']}{desc_str}")
+    try:
+        confirm = input("Remove? [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+    if confirm == "y":
+        entries.pop()
+        save_entries(entries)
+        print("Removed.")
+        git_sync("undo last entry")
+
+
+def cmd_rm(args):
+    if not args:
+        print("Usage: zeit rm <date>")
+        print("  zeit rm today | zeit rm yesterday | zeit rm 2026-04-01")
+        return
+
+    target = parse_date(args[0])
+    target_iso = target.isoformat()
+    entries = load_entries()
+    matches = [(i, e) for i, e in enumerate(entries) if e["date"] == target_iso]
+
+    if not matches:
+        print(f"No entries on {target_iso}.")
+        return
+
+    try:
+        if len(matches) == 1:
+            i, e = matches[0]
+            desc_str = f"  {e['desc']}" if e.get("desc") else ""
+            print(f"  {e['hours']}h  {e['project']}{desc_str}")
+            confirm = input("Remove? [y/N] ").strip().lower()
+            if confirm != "y":
+                return
+            to_remove = {i}
+        else:
+            print(f"\n{len(matches)} entries on {target_iso}:\n")
+            for j, (i, e) in enumerate(matches, 1):
+                desc_str = f"  {e['desc']}" if e.get("desc") else ""
+                print(f"  {j}. {e['hours']}h  {e['project']}{desc_str}")
+            print(f"  0. All")
+            print()
+            choice = input("Remove which? (or Enter to cancel): ").strip()
+            if not choice:
+                return
+            idx = int(choice)
+            if idx == 0:
+                to_remove = {i for i, _ in matches}
+            elif 1 <= idx <= len(matches):
+                to_remove = {matches[idx - 1][0]}
+            else:
+                print("Invalid choice.")
+                return
+    except (EOFError, KeyboardInterrupt):
+        print()
+        return
+
+    new_entries = [e for i, e in enumerate(entries) if i not in to_remove]
+    save_entries(new_entries)
+    count = len(to_remove)
+    print(f"Removed {count} {'entry' if count == 1 else 'entries'}.")
+    git_sync(f"rm {count} entries on {target_iso}")
+
+
+def cmd_edit(_args):
+    editor = os.environ.get("EDITOR", "nano")
+    subprocess.run([editor, str(LOG_FILE)])
+
+
+def cmd_list(_args):
+    config = load_config()
+    currency = get_currency(config)
+    projects = config.get("projects", {})
+    if not projects:
+        print("No projects configured.")
+        return
+    # Group by label
+    by_label = {}
+    for prefix, entry in projects.items():
+        if isinstance(entry, dict):
+            label = entry.get("label", prefix)
+            rate = entry.get("rate", 0)
+        else:
+            label = entry
+            rate = 0
+        by_label.setdefault(label, {"dirs": [], "rate": rate})
+        by_label[label]["dirs"].append(prefix)
+    for label in sorted(by_label):
+        info = by_label[label]
+        rate_str = f"  ({info['rate']} {currency}/h)" if info["rate"] and currency else ""
+        real_dirs = [d for d in info["dirs"] if not d.startswith("__imported__")]
+        print(f"  {label}{rate_str}")
+        for d in sorted(real_dirs):
+            print(f"    {d}")
+
+
+def cmd_sync(_args):
+    git_sync("manual sync")
+
+
+HELP = """
+zeit — simple time logger
+
+  zeit <hours> [date] [description]   Log hours (default: today)
+  zeit <hours> <start>..<end> [desc]  Log hours for a date range
+  zeit sum [month] [project]          Show entries + total (auto-filters by cwd)
+  zeit sum march all                  Show all projects for a month
+  zeit last [n]                       Show last n entries (default: 10)
+  zeit undo                           Remove last entry
+  zeit rm <date>                      Remove entries on a specific date
+  zeit edit                           Open log in $EDITOR
+  zeit list                           Show projects with directories and rates
+  zeit sync                           Manual GitHub sync
+  zeit init                           First-time setup
+  zeit config                         Change settings
+  zeit -h                             Show this help
+  zeit --version                      Show version
+
+Date formats:
+  today, yesterday, -2 (days ago), monday, 03-28, 2026-03-28
+
+Month filters for sum:
+  zeit sum april | zeit sum 04 | zeit sum 2026-04 | zeit sum all
+""".strip()
+
+
+def main():
+    args = sys.argv[1:]
+
+    if not args or args[0] in ("-h", "--help"):
+        print(HELP)
+        return
+
+    if args[0] in ("-v", "--version"):
+        print(f"zeit {VERSION}")
+        return
+
+    cmd = args[0]
+
+    # Commands that work without config
+    unchecked = {"init": cmd_init}
+
+    if cmd in unchecked:
+        unchecked[cmd](args[1:])
+        return
+
+    # Everything else requires config
+    if not is_configured():
+        print("zeit is not configured yet. Run `zeit init` to get started.")
+        return
+
+    commands = {
+        "sum": cmd_sum,
+        "undo": cmd_undo,
+        "rm": cmd_rm,
+        "edit": cmd_edit,
+        "list": cmd_list,
+        "last": cmd_last,
+        "sync": cmd_sync,
+        "config": cmd_config,
+    }
+
+    if cmd in commands:
+        commands[cmd](args[1:])
+        return
+
+    # Default: log hours
+    try:
+        float(args[0])
+    except ValueError:
+        print(f"Unknown command: {cmd}")
+        print("Run 'zeit -h' for help.")
+        return
+
+    cmd_log_hours(args)
+
+
+if __name__ == "__main__":
+    main()
