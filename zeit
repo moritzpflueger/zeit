@@ -108,7 +108,7 @@ def detect_project(config):
             best_label = get_project_label(config, prefix)
     return best_label
 
-def ask_project(config):
+def ask_project(config, message=None):
     """Interactive project picker. Returns label or None if cancelled."""
     cwd = os.getcwd()
     currency = get_currency(config)
@@ -127,7 +127,10 @@ def ask_project(config):
             existing[label] = 0
 
     try:
-        print(f"\nUnknown project directory: {cwd}\n")
+        if message:
+            print(f"\n{message}\n")
+        else:
+            print(f"\nUnknown project directory: {cwd}\n")
         sorted_labels = sorted(existing.keys())
         if sorted_labels:
             for i, label in enumerate(sorted_labels, 1):
@@ -137,7 +140,7 @@ def ask_project(config):
                 print(f"  {i}. {c}{label}{RESET}{rate_str}")
             print(f"  0. New project")
             print()
-            choice = input("Pick (or Enter to cancel): ").strip()
+            choice = input("Pick (Ctrl+C or Enter to cancel):").strip()
             if not choice:
                 return None
             # Accept label text as well as number
@@ -180,7 +183,7 @@ def _create_new_project(config, cwd):
     if not label:
         return None
     if currency:
-        rate_str = input(f"Hourly rate ({currency}, Enter to skip): ").strip()
+        rate_str = input(f"Hourly rate ({currency}, Ctrl+C or Enter to skip):").strip()
         rate = float(rate_str) if rate_str else 0
     else:
         rate = 0
@@ -412,7 +415,7 @@ def git_sync(message="update log"):
 def _setup_currency(config):
     """Ask for currency. Returns updated config."""
     print("  What currency do you bill in?")
-    currency = input("  Currency (Enter to skip): ").strip().upper()
+    currency = input("  Currency (Ctrl+C or Enter to skip):").strip().upper()
     if currency:
         config["currency"] = currency
         print(f"  Set to {currency}.")
@@ -608,12 +611,12 @@ def cmd_init(_args):
     print(f"  Current directory: {cwd}")
     print()
     try:
-        label = input("  Project name (Enter to skip): ").strip()
+        label = input("  Project name (Ctrl+C or Enter to skip):").strip()
         if label:
             currency = get_currency(config)
             rate = 0
             if currency:
-                rate_str = input(f"  Hourly rate for {label} ({currency}, Enter to skip): ").strip()
+                rate_str = input(f"  Hourly rate for {label} ({currency}, Ctrl+C or Enter to skip):").strip()
                 rate = float(rate_str) if rate_str else 0
             config["projects"][cwd] = {"label": label, "rate": rate}
             if rate and currency:
@@ -674,7 +677,7 @@ def cmd_config(_args):
     print()
 
     try:
-        choice_str = input("  Pick (or Enter to cancel): ").strip()
+        choice_str = input("  Pick (Ctrl+C or Enter to cancel):").strip()
     except (EOFError, KeyboardInterrupt):
         print()
         return
@@ -698,7 +701,7 @@ def cmd_config(_args):
     elif action == "symlink":
         _setup_symlink()
     elif action == "rate":
-        rate_str = input(f"  Hourly rate for {current_label} ({currency}, Enter to skip): ").strip()
+        rate_str = input(f"  Hourly rate for {current_label} ({currency}, Ctrl+C or Enter to skip):").strip()
         if rate_str:
             rate = float(rate_str)
             for prefix, entry in config.get("projects", {}).items():
@@ -713,8 +716,8 @@ def cmd_config(_args):
             if cwd == prefix or cwd.startswith(prefix + "/"):
                 del config["projects"][prefix]
                 break
-        _create_new_project(config, cwd)
-        git_sync("update config")
+        if ask_project(config, message="Pick a project for this directory:"):
+            git_sync("update config")
     print()
 
 
@@ -968,7 +971,7 @@ def cmd_sum(args):
             print(f"  {i}. {c}{p}{RESET}")
         print()
         try:
-            choice = input("  Show project (Enter to skip): ").strip()
+            choice = input("  Show project (Ctrl+C or Enter to skip):").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             break
@@ -1079,7 +1082,7 @@ def cmd_rm(args):
                 print(f"  {j}. {e['hours']}h  {e['project']}{desc_str}")
             print(f"  0. All")
             print()
-            choice = input("Remove which? (or Enter to cancel): ").strip()
+            choice = input("Remove which? (Ctrl+C or Enter to cancel):").strip()
             if not choice:
                 return
             idx = int(choice)
